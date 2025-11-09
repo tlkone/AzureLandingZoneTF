@@ -1,0 +1,67 @@
+trigger: none
+pr:
+  branches: { include: [ "*" ] }
+
+variables:
+- group: vg-landingzone
+
+pool: { vmImage: ubuntu-latest }
+
+stages:
+- stage: Validate
+  displayName: "PR Validate (fmt/validate/plan)"
+  jobs:
+  - job: tf
+    displayName: "Terraform fmt/validate/plan (dev)"
+    steps:
+    - checkout: self
+
+    - task: TerraformInstaller@1
+      inputs: { terraformVersion: '1.7.5' }
+
+    # Optional: ensure backend exists
+    - task: AzureCLI@2
+      displayName: "Ensure backend exists"
+      inputs:
+        azureSubscription: 'sc-azure-landingzone'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          az group create -n $(TF_BACKEND_RG) -l $(LOCATION)
+          az storage account show -n $(TF_STATE_SA) -g $(TF_BACKEND_RG) >/dev/null 2>&1 || \
+            az storage account create -n $(TF_STATE_SA) -g $(TF_BACKEND_RG) -l $(LOCATION) --sku Standard_LRS --kind StorageV2
+          az storage container create --account-name $(TF_STATE_SA) --name $(TF_STATE_CONT) || true
+
+    - task: AzureCLI@2
+      displayName: "fmt / init / validate / plan (dev)"
+      inputs:
+        azureSubscription: 'sc-azure-landingzone'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd terraform
+
+          terraform fmt -recursive -check
+
+          terraform init \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_STATE_SA)" \
+            -backend-config="container_name=$(TF_STATE_CONT)" \
+            -backend-config="key=$(TF_STATE_KEY)"
+
+          terraform validate
+
+          terraform plan -input=false \
+            -var "location=$(LOCATION)" \
+            -var "management_group_id=$(MG_ID)" \
+            -var-file="environments/dev.tfvars" \
+            -out tfplan
+
+          terraform show -no-color tfplan > tfplan.txt
+
+    - publish: terraform/tfplan
+      artifact: tfplan
+    - publish: terraform/tfplan.txt
+      artifact: plantext
