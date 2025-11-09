@@ -1,0 +1,28 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local .terraform directories
+.terraform/
+.terraform.lock.hcl
+
+# Sensitive output or plan files
+*.tfplan
+*.tfvars
+*.tfvars.json
+
+# Logs & temporary files
+*.log
+*.bak
+*.tmp
+*.swp
+.DS_Store
+
+# VS Code
+.vscode/
+.history/
