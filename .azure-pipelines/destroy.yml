@@ -1,0 +1,69 @@
+# ==============================================
+# Terraform Destroy Pipeline (Guarded)
+# ==============================================
+
+trigger: none   # Must be run manually — no auto trigger!
+
+variables:
+- group: vg-landingzone
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+- stage: ConfirmDestroy
+  displayName: "🔒 Manual Approval Required"
+  jobs:
+  - job: Approval
+    displayName: "Approval Gate"
+    steps:
+    - script: |
+        echo "WARNING: This pipeline will permanently destroy resources."
+        echo "This job requires manual approval in the Azure DevOps UI."
+      displayName: "Pending approval"
+
+- stage: Destroy
+  displayName: "🔥 Terraform Destroy"
+  dependsOn: ConfirmDestroy
+  condition: and(succeeded(), eq(variables['DO_DESTROY'], 'true'))
+  jobs:
+  - job: tf_destroy
+    displayName: "Terraform destroy (prod)"
+    steps:
+
+    - checkout: self
+
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: '1.7.5'
+
+    - task: AzureCLI@2
+      displayName: "Terraform init + destroy"
+      inputs:
+        azureSubscription: 'sc-azure-landingzone'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd terraform
+
+          echo ">>> Initializing backend..."
+          terraform init \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_STATE_SA)" \
+            -backend-config="container_name=$(TF_STATE_CONT)" \
+            -backend-config="key=$(TF_STATE_KEY)"
+
+          terraform workspace select prod || terraform workspace new prod
+
+          echo ">>> Confirming DO_DESTROY flag..."
+          if [ "$(DO_DESTROY)" != "true" ]; then
+            echo "ERROR: You must set DO_DESTROY=true to proceed with a destroy."
+            exit 1
+          fi
+
+          echo ">>> Running terraform destroy..."
+          terraform destroy -auto-approve \
+            -var "location=$(LOCATION)" \
+            -var "management_group_id=$(MG_ID)" \
+            -var-file="environments/prod.tfvars"
