@@ -1,67 +1,83 @@
 trigger: none
 pr:
-  branches: { include: [ "*" ] }
+  branches:
+    include:
+      - main
+      - '*'
 
 variables:
 - group: vg-landingzone
 
-pool: { name: TLKCloudPool }
+pool:
+  name: TLKCloudPool   # your Windows agent pool
 
 stages:
 - stage: Validate
-  displayName: "PR Validate (fmt/validate/plan)"
+  displayName: "PR Validate (fmt/validate/plan - dev)"
   jobs:
   - job: tf
-    displayName: "Terraform fmt/validate/plan (dev)"
+    displayName: "Terraform validate + plan (dev)"
     steps:
     - checkout: self
 
-    - task: TerraformInstaller@1
-      inputs: { terraformVersion: '1.7.5' }
+    # Install Terraform (Windows) and add to PATH for subsequent steps
+    - pwsh: |
+        $ver = "1.7.5"
+        $dir = "$env:AGENT_TOOLSDIRECTORY\terraform\$ver"
+        New-Item -Force -ItemType Directory -Path $dir | Out-Null
+        Invoke-WebRequest -Uri "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip" -OutFile "$dir\tf.zip"
+        Expand-Archive "$dir\tf.zip" -DestinationPath $dir -Force
+        Remove-Item "$dir\tf.zip" -Force
+        Write-Host "##vso[task.prependpath]$dir"
+        terraform -version
+      displayName: "Install Terraform (Windows)"
 
-    # Optional: ensure backend exists
+    # Ensure remote state exists (RG/SA/container)
     - task: AzureCLI@2
       displayName: "Ensure backend exists"
       inputs:
         azureSubscription: 'sc-azure-landingzone'
-        scriptType: bash
+        scriptType: pscore
         scriptLocation: inlineScript
         inlineScript: |
-          set -euo pipefail
-          az group create -n $(TF_BACKEND_RG) -l $(LOCATION)
-          az storage account show -n $(TF_STATE_SA) -g $(TF_BACKEND_RG) >/dev/null 2>&1 || \
-            az storage account create -n $(TF_STATE_SA) -g $(TF_BACKEND_RG) -l $(LOCATION) --sku Standard_LRS --kind StorageV2
-          az storage container create --account-name $(TF_STATE_SA) --name $(TF_STATE_CONT) || true
+          az group create -n "$(TF_BACKEND_RG)" -l "$(LOCATION)" | Out-Null
 
+          $sa = az storage account show -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" 2>$null
+          if (-not $sa) {
+            az storage account create -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" -l "$(LOCATION)" --sku Standard_LRS --kind StorageV2 | Out-Null
+          }
+
+          az storage container create --account-name "$(TF_STATE_SA)" --name "$(TF_STATE_CONT)" 2>$null | Out-Null
+
+    # Init / Validate / Plan (DEV)
     - task: AzureCLI@2
-      displayName: "fmt / init / validate / plan (dev)"
+      displayName: "Terraform init/validate/plan (dev)"
       inputs:
         azureSubscription: 'sc-azure-landingzone'
-        scriptType: bash
+        scriptType: pscore
         scriptLocation: inlineScript
+        workingDirectory: '$(Build.SourcesDirectory)/terraform'
         inlineScript: |
-          set -euo pipefail
-          cd terraform
-
-          terraform fmt -recursive -check
-
-          terraform init \
-            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
-            -backend-config="storage_account_name=$(TF_STATE_SA)" \
-            -backend-config="container_name=$(TF_STATE_CONT)" \
+          terraform init `
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" `
+            -backend-config="storage_account_name=$(TF_STATE_SA)" `
+            -backend-config="container_name=$(TF_STATE_CONT)" `
             -backend-config="key=$(TF_STATE_KEY)"
 
+          terraform fmt -recursive -check
           terraform validate
 
-          terraform plan -input=false \
-            -var "location=$(LOCATION)" \
-            -var "management_group_id=$(MG_ID)" \
-            -var-file="environments/dev.tfvars" \
+          terraform plan -input=false `
+            -var "location=$(LOCATION)" `
+            -var "management_group_id=$(MG_ID)" `
+            -var-file="environments/dev.tfvars" `
             -out tfplan
 
           terraform show -no-color tfplan > tfplan.txt
 
-    - publish: terraform/tfplan
-      artifact: tfplan
-    - publish: terraform/tfplan.txt
-      artifact: plantext
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish plan artifact (dev)"
+      inputs:
+        PathtoPublish: '$(Build.SourcesDirectory)/terraform/tfplan.txt'
+        ArtifactName: 'plan-dev'
+        publishLocation: 'Container'
