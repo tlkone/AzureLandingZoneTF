@@ -12,7 +12,7 @@ variables:
   TF_STATE_SA: tfstatestorage88kt79
   TF_STATE_CONT: tfstate
   TF_STATE_KEY: landingzone/dev.tfstate
-  MG_ID: ba2303f3-2277-44e6-b32f-b346f5736dcc
+  MG_ID: LandingZones
 
 steps:
 # 1) Export SPN to ARM_* variables (robust to missing envs)
