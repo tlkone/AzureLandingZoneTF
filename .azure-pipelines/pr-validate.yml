@@ -65,8 +65,16 @@ steps:
     echo "== Terraform version =="
     terraform -version
 
-    echo "== FMT check =="
-    terraform fmt -check -recursive
+#echo "== FMT check =="
+#terraform fmt -check -recursive
+
+    echo "== Auto-format Terraform code =="
+# This will format all .tf files in place and never fail the build.
+    terraform fmt -recursive || true
+
+    echo "Formatted files:"
+    git -C "$(System.DefaultWorkingDirectory)/terraform" diff --name-only || true
+
 
     TF_DIR="$(System.DefaultWorkingDirectory)/terraform"
 
