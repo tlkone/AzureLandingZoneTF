@@ -24,7 +24,7 @@ module "identity" {
 module "policy" {
   source   = "./policy"
   location = var.location
-  management_group_id = "LandingZones" # or your actual MG ID
+  management_group_id = "ba2303f3-2277-44e6-b32f-b346f5736dcc" # or your actual MG ID
   #management_group_id = local.management_group_id
   log_analytics_id    = module.management.law_id
 }
