@@ -24,7 +24,8 @@ module "identity" {
 module "policy" {
   source              = "./policy"
   location            = var.location
-  management_group_id = "LandingZones" # or your actual MG ID
+  #management_group_id = "LandingZones" # or your actual MG ID
+  management_group_id = var.management_group_id
   log_analytics_id    = module.management.law_id
 }
 
