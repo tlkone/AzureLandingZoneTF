@@ -2,7 +2,7 @@ trigger: none
 
 variables:
 - group: vg-landingzone
-# Runtime guard: set when clicking "Run pipeline"
+# Runtime guard: set when clicking "Run pipeline here"
 # DO_DESTROY must equal "true" to proceed
 
 pool:

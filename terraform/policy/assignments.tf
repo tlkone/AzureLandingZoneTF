@@ -18,7 +18,7 @@ resource "azurerm_management_group_policy_assignment" "deploy_azure_monitor_agen
 
   # Parameter name must match the built-in definition
   #parameters = jsonencode({
-    #logAnalyticsWorkspaceResourceId = { value = var.log_analytics_id }
+  #logAnalyticsWorkspaceResourceId = { value = var.log_analytics_id }
   #})
 
   #enforcement_mode = "Default"
@@ -57,27 +57,27 @@ resource "azurerm_management_group_policy_assignment" "require_tags" {
 # Grant the 'Diag-KV-Mgmt' Policy Identity Contributor role on the Log Analytics Workspace
 resource "azurerm_role_assignment" "kv_diag_contributor" {
   # The scope is the Log Analytics Workspace ID
-  scope                = var.log_analytics_id
-  
+  scope = var.log_analytics_id
+
   # The identity of the policy assignment we just created
-  principal_id         = azurerm_management_group_policy_assignment.diagnostic_keyvault.identity[0].principal_id
-  
+  principal_id = azurerm_management_group_policy_assignment.diagnostic_keyvault.identity[0].principal_id
+
   # The Role Definition ID (or Name) required to set up diagnostic settings
-  role_definition_name = "Log Analytics Contributor" 
+  role_definition_name = "Log Analytics Contributor"
 }
 
 # Grant the Policy Identities Contributor role on the Management Group Scope
 resource "azurerm_role_assignment" "mg_contributor" {
   # The scope is the Management Group
-  scope                = data.azurerm_management_group.mg.id
-  
+  scope = data.azurerm_management_group.mg.id
+
   # Use the identity of one of the DINE policies, as they both need this high-level access
   # We'll use the AMA identity for this example.
-  principal_id         = azurerm_management_group_policy_assignment.deploy_azure_monitor_agent.identity[0].principal_id
-  
+  principal_id = azurerm_management_group_policy_assignment.deploy_azure_monitor_agent.identity[0].principal_id
+
   # Grant Contributor role so it can deploy/modify resources within the scope
   role_definition_name = "Contributor"
-  
+
   # NOTE: To prevent conflicts, you must only create ONE role assignment resource 
   # per principal_id per scope (unless using different role definitions).
 }
