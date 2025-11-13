@@ -15,5 +15,3 @@ resource "random_string" "kv_suffix" {
   upper   = false
   special = false
 }
-
-#management_group_id = "LandingZones"
