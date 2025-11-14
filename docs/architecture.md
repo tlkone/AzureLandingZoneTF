@@ -105,7 +105,14 @@ Configured via `backend.tf`.
 
 ## 6. High-Level Diagram
 
-*(Add your diagram here – the CAF visuals from your screenshots)*
+```markdown
+<details>
+<summary>📊 View Interactive Architecture Diagram</summary>
+
+Launch Interactive Diagram
+
+</details>
+```
 
 ---
 
