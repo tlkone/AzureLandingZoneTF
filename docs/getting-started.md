@@ -22,8 +22,10 @@ This guide explains how to deploy the Azure landing zone from scratch using Terr
 
 ## 1. Clone the Repository
 
-git clone https://github.com/<your-user>/AzureLandingZoneTF.git
+```bash
+git clone https://github.com/tlkone/AzureLandingZoneTF.git
 cd AzureLandingZoneTF/terraform
+
 
 ---
 
