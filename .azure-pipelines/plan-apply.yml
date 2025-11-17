@@ -1,0 +1,215 @@
+# -------- CI trigger --------
+trigger:
+  branches:
+    include:
+    - main
+
+# You can keep these in the variable group, but MG_ID must exist somewhere.
+variables:
+- group: <youradovariablegroupname>
+# Safety net: define MG_ID here if it isn't in the group
+- name: MG_ID
+  value: <yourmanagementgroupidname>
+
+pool:
+  name: <yourpoolname>
+
+stages:
+# ================= PLAN =================
+- stage: Plan
+  displayName: "Plan (prod)"
+  jobs:
+  - job: plan
+    displayName: "Terraform plan (prod)"
+    steps:
+    - checkout: self
+
+    # Install Terraform on the Windows agent (kept from your original)
+    - pwsh: |
+        $ver = "1.7.5"
+        $dir = "$env:AGENT_TOOLSDIRECTORY\terraform\$ver"
+        New-Item -Force -ItemType Directory -Path $dir | Out-Null
+        Invoke-WebRequest -Uri "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip" -OutFile "$dir\tf.zip"
+        Expand-Archive "$dir\tf.zip" -DestinationPath $dir -Force
+        Remove-Item "$dir\tf.zip" -Force
+        Write-Host "##vso[task.prependpath]$dir"
+        terraform -version
+      displayName: "Install Terraform (Windows)"
+
+    # Export SPN -> ARM_* so azurerm provider authenticates as a Service Principal
+    - task: AzureCLI@2
+      displayName: "Export SPN to ARM_* variables"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: bash
+        addSpnToEnvironment: true
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -eo pipefail
+          CLIENT_ID="${servicePrincipalId:-${AZURE_CLIENT_ID:-}}"
+          CLIENT_SECRET="${servicePrincipalKey:-${AZURE_CLIENT_SECRET:-}}"
+          TENANT_ID="${tenantId:-$(az account show --query tenantId -o tsv || true)}"
+          SUBSCRIPTION_ID="${subscriptionId:-$(az account show --query id -o tsv || true)}"
+
+          echo "##vso[task.setvariable variable=ARM_CLIENT_ID]$CLIENT_ID"
+          echo "##vso[task.setvariable variable=ARM_CLIENT_SECRET;issecret=true]$CLIENT_SECRET"
+          echo "##vso[task.setvariable variable=ARM_TENANT_ID]$TENANT_ID"
+          echo "##vso[task.setvariable variable=ARM_SUBSCRIPTION_ID]$SUBSCRIPTION_ID"
+
+    # Ensure backend exists (same logic as yours)
+    - task: AzureCLI@2
+      displayName: "Ensure backend exists"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          az group create -n "$(TF_BACKEND_RG)" -l "$(LOCATION)"
+          if ! az storage account show -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" >/dev/null 2>&1; then
+            az storage account create -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" -l "$(LOCATION)" --sku Standard_LRS --kind StorageV2
+          fi
+          az storage container create --account-name "$(TF_STATE_SA)" --name "$(TF_STATE_CONT)" --auth-mode login >/dev/null 2>&1 || true
+
+    # Terraform init / fmt / validate / plan (Bash, with -chdir, using ARM_* env vars)
+    - task: AzureCLI@2
+      displayName: "Terraform init/plan (prod)"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+
+          TF_DIR="$(Build.SourcesDirectory)/terraform"
+
+          echo "== Terraform =="
+          terraform -version
+
+          echo "== INIT =="
+          terraform -chdir="$TF_DIR" init -input=false \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_STATE_SA)" \
+            -backend-config="container_name=$(TF_STATE_CONT)" \
+            -backend-config="key=$(TF_STATE_KEY)"
+
+          echo "== FMT (non-blocking) =="
+          terraform -chdir="$TF_DIR" fmt -recursive || true
+          git -C "$TF_DIR" diff --name-only || true
+
+          echo "== VALIDATE =="
+          terraform -chdir="$TF_DIR" validate
+
+          echo "== PLAN =="
+          terraform -chdir="$TF_DIR" plan -input=false \
+            -var "location=$(LOCATION)" \
+            -var "management_group_id=$(MG_ID)" \
+            -var-file="environments/prod.tfvars" \
+            -out tfplan
+
+          terraform -chdir="$TF_DIR" show -no-color tfplan > "$TF_DIR/tfplan.txt"
+      env:
+        ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+        ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+        ARM_TENANT_ID: $(ARM_TENANT_ID)
+        ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish plan artifact"
+      inputs:
+        PathtoPublish: '$(Build.SourcesDirectory)/terraform'
+        ArtifactName: 'tfplan-prod'
+        publishLocation: 'Container'
+
+# ================= MANUAL APPROVAL =================
+- stage: Approval
+  displayName: "Manual approval"
+  dependsOn: Plan
+  jobs:
+  - job: wait
+    displayName: "Approve to apply"
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440
+      inputs:
+        instructions: |
+          Review the Terraform plan artifact (tfplan.txt).
+          Approve to continue to APPLY.
+        onTimeout: 'reject'
+
+# ================= APPLY =================
+- stage: Apply
+  displayName: "Apply (prod)"
+  dependsOn: Approval
+  condition: succeeded()
+  jobs:
+  - job: apply
+    displayName: "Terraform apply (prod)"
+    steps:
+    - checkout: self
+
+    - pwsh: |
+        $ver = "1.7.5"
+        $dir = "$env:AGENT_TOOLSDIRECTORY\terraform\$ver"
+        New-Item -Force -ItemType Directory -Path $dir | Out-Null
+        Invoke-WebRequest -Uri "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip" -OutFile "$dir\tf.zip"
+        Expand-Archive "$dir\tf.zip" -DestinationPath $dir -Force
+        Remove-Item "$dir\tf.zip" -Force
+        Write-Host "##vso[task.prependpath]$dir"
+        terraform -version
+      displayName: "Install Terraform (Windows)"
+
+    - task: DownloadBuildArtifacts@1
+      displayName: "Download plan artifact"
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'tfplan-prod'
+        downloadPath: '$(Pipeline.Workspace)/artifacts'
+
+    # Re-create the ARM_* env vars for the Apply stage
+    - task: AzureCLI@2
+      displayName: "Export SPN to ARM_* variables (apply)"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: bash
+        addSpnToEnvironment: true
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -eo pipefail
+          CLIENT_ID="${servicePrincipalId:-${AZURE_CLIENT_ID:-}}"
+          CLIENT_SECRET="${servicePrincipalKey:-${AZURE_CLIENT_SECRET:-}}"
+          TENANT_ID="${tenantId:-$(az account show --query tenantId -o tsv || true)}"
+          SUBSCRIPTION_ID="${subscriptionId:-$(az account show --query id -o tsv || true)}"
+
+          echo "##vso[task.setvariable variable=ARM_CLIENT_ID]$CLIENT_ID"
+          echo "##vso[task.setvariable variable=ARM_CLIENT_SECRET;issecret=true]$CLIENT_SECRET"
+          echo "##vso[task.setvariable variable=ARM_TENANT_ID]$TENANT_ID"
+          echo "##vso[task.setvariable variable=ARM_SUBSCRIPTION_ID]$SUBSCRIPTION_ID"
+
+    - task: AzureCLI@2
+      displayName: "Terraform init + apply (prod)"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+
+          TF_DIR="$(Pipeline.Workspace)/artifacts/tfplan-prod"
+
+          echo "== INIT (reconfigure) =="
+          terraform -chdir="$TF_DIR" init -input=false -reconfigure \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_STATE_SA)" \
+            -backend-config="container_name=$(TF_STATE_CONT)" \
+            -backend-config="key=$(TF_STATE_KEY)"
+
+          echo "== APPLY =="
+          terraform -chdir="$TF_DIR" apply -input=false -auto-approve tfplan
+      env:
+        ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+        ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+        ARM_TENANT_ID: $(ARM_TENANT_ID)
+        ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)

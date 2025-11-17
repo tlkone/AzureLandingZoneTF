@@ -1,0 +1,70 @@
+trigger: none
+
+variables:
+- group: <youradovariablegroupname>
+# Runtime guard: set when clicking "Run pipeline here"
+# DO_DESTROY must equal "true" to proceed
+
+pool:
+  name: <yourpoolname>
+
+stages:
+- stage: Confirm
+  displayName: "Manual approval for destroy"
+  jobs:
+  - job: hold
+    displayName: "Confirm destroy"
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        instructions: |
+          This will run 'terraform destroy' using prod.tfvars.
+          Only proceed if you intend to permanently remove resources.
+          Also ensure the variable DO_DESTROY=true is set at run time.
+        onTimeout: 'reject'
+      timeoutInMinutes: 1440
+
+- stage: Destroy
+  displayName: "Terraform Destroy (prod)"
+  dependsOn: Confirm
+  condition: and(succeeded(), eq(variables['DO_DESTROY'], 'true'))
+  jobs:
+  - job: destroy
+    displayName: "Destroy"
+    steps:
+    - checkout: self
+
+    - pwsh: |
+        $ver = "1.7.5"
+        $dir = "$env:AGENT_TOOLSDIRECTORY\terraform\$ver"
+        New-Item -Force -ItemType Directory -Path $dir | Out-Null
+        Invoke-WebRequest -Uri "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip" -OutFile "$dir\tf.zip"
+        Expand-Archive "$dir\tf.zip" -DestinationPath $dir -Force
+        Remove-Item "$dir\tf.zip" -Force
+        Write-Host "##vso[task.prependpath]$dir"
+        terraform -version
+      displayName: "Install Terraform (Windows)"
+
+    - task: AzureCLI@2
+      displayName: "terraform init + destroy"
+      inputs:
+        azureSubscription: '<yourserviceconnectionname>'
+        scriptType: pscore
+        scriptLocation: inlineScript
+        workingDirectory: '$(Build.SourcesDirectory)/terraform'
+        inlineScript: |
+          if ("$(DO_DESTROY)" -ne "true") {
+            Write-Error "DO_DESTROY must be set to true at queue time."
+            exit 1
+          }
+
+          terraform init `
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" `
+            -backend-config="storage_account_name=$(TF_STATE_SA)" `
+            -backend-config="container_name=$(TF_STATE_CONT)" `
+            -backend-config="key=$(TF_STATE_KEY)"
+
+          terraform destroy -auto-approve `
+            -var "location=$(LOCATION)" `
+            -var "management_group_id=$(MG_ID)" `
+            -var-file="environments/prod.tfvars"

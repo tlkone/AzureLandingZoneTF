@@ -1,0 +1,97 @@
+# PR validation – fmt/validate/plan (no apply)
+trigger: none
+pr:
+  branches: { include: [ '*' ] }
+
+pool:
+  name: <yourpoolname>
+
+variables:
+  LOCATION: <yorudeploymentlocation>
+  TF_BACKEND_RG: <yourbackendresourcegroup>
+  TF_STATE_SA: <storageaccountnamethatholdsstatefile>
+  TF_STATE_CONT: tfstate
+  TF_STATE_KEY: <statefilename>
+  MG_ID: <yourmanagementgroupidname>LandingZones
+
+steps:
+# 1) Export SPN to ARM_* variables (robust to missing envs)
+- task: AzureCLI@2
+  displayName: Export SPN to ARM_* variables
+  inputs:
+    azureSubscription: <yourserviceconnectionname>
+    scriptType: bash
+    addSpnToEnvironment: true
+    scriptLocation: inlineScript
+    inlineScript: |
+      # no -u here; some agents don't expose all four vars
+      set -eo pipefail
+
+      # Prefer ADO-provided vars; fall back to az account
+      CLIENT_ID="${servicePrincipalId:-${AZURE_CLIENT_ID:-}}"
+      CLIENT_SECRET="${servicePrincipalKey:-${AZURE_CLIENT_SECRET:-}}"
+      TENANT_ID="${tenantId:-$(az account show --query tenantId -o tsv || true)}"
+      SUBSCRIPTION_ID="${subscriptionId:-$(az account show --query id -o tsv || true)}"
+
+      if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$TENANT_ID" ]; then
+        echo "One or more required SPN values are empty. Dumping az context for debug:" >&2
+        az account show || true
+      fi
+
+      echo "##vso[task.setvariable variable=ARM_CLIENT_ID]$CLIENT_ID"
+      echo "##vso[task.setvariable variable=ARM_CLIENT_SECRET;issecret=true]$CLIENT_SECRET"
+      echo "##vso[task.setvariable variable=ARM_TENANT_ID]$TENANT_ID"
+      echo "##vso[task.setvariable variable=ARM_SUBSCRIPTION_ID]$SUBSCRIPTION_ID"
+
+# 2) Ensure tfstate backend exists
+- task: AzureCLI@2
+  displayName: Ensure tfstate storage exists
+  inputs:
+    azureSubscription: <yourserviceconnectionname>
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -euo pipefail
+      az group create -n "$(TF_BACKEND_RG)" -l "$(LOCATION)"
+      if ! az storage account show -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" >/dev/null 2>&1; then
+        az storage account create -n "$(TF_STATE_SA)" -g "$(TF_BACKEND_RG)" -l "$(LOCATION)" --sku Standard_LRS
+      fi
+      az storage container create --account-name "$(TF_STATE_SA)" --name "$(TF_STATE_CONT)" --auth-mode login >/dev/null 2>&1 || true
+
+# 3) Terraform fmt / init / validate / plan (Bash)
+- bash: |
+    set -euo pipefail
+
+    echo "== Terraform version =="
+    terraform -version
+
+    echo "== Auto-format Terraform code =="
+    terraform fmt -recursive || true
+
+    echo "Formatted files:"
+    git -C "$(System.DefaultWorkingDirectory)/terraform" diff --name-only || true
+
+
+    TF_DIR="$(System.DefaultWorkingDirectory)/terraform"
+
+    echo "== INIT backend =="
+    terraform -chdir="$TF_DIR" init -input=false \
+      -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+      -backend-config="storage_account_name=$(TF_STATE_SA)" \
+      -backend-config="container_name=$(TF_STATE_CONT)" \
+      -backend-config="key=$(TF_STATE_KEY)"
+
+    echo "== VALIDATE =="
+    terraform -chdir="$TF_DIR" validate
+
+    echo "== PLAN =="
+    terraform -chdir="$TF_DIR" plan -input=false \
+      -var "location=$(LOCATION)" \
+      -var "management_group_id=$(MG_ID)" \
+      -out tfplan.out
+  displayName: Terraform validate + plan (bash)
+  env:
+    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+    ARM_TENANT_ID: $(ARM_TENANT_ID)
+    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
